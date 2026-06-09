@@ -1,2 +1,2 @@
 # Wind-Farm-Fisheries-Economic-Spatial-Allocation-Model
-Here we present a spatially explicit fisheries economics model that combines VMS, logbook, fleet register, and economic data to estimate fishing effort, landings, revenues, and profitability across marine areas.
+Open-source spatial fisheries economics model designed to map fishing effort, landings, revenues, and profitability at fine spatial scales. By integrating vessel tracking data (VMS), logbooks, fleet characteristics, and economic indicators, the model provides a comprehensive framework for assessing the economic footprint of fishing activities and supporting evidence-based fisheries management and marine spatial planning.
