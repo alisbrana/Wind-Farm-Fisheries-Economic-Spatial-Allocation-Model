@@ -1,0 +1,2113 @@
+---
+title: "Sbrana_Advanced_Lander_Wind Farm Clean - Set Up"
+author: "Sbrana A."
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: united
+    toc: true
+    toc_float: true
+    df_print: paged
+    highlight: tango
+    always_allow_html: true
+  pdf_document:
+    toc: true
+    latex_engine: xelatex
+  word_document:
+    toc: true
+editor_options:
+  markdown:
+    wrap: sentence
+---
+
+
+# Introduction
+
+The Mediterranean Sea is affected by a serious trend of overfishing, which poses a threat to the health and sustainability of its fish stocks. In order to address this critical issue, there is an urgent need for robust and effective management actions to ensure the long-term viability of fishery resources. 
+
+A spatially explicit bio-economic model that supports sustainable management by simulating fishing effort impacts. It integrates catch, stock, Vessel Monitoring System (VMS) data, and economic indicators, crucial for the Ecosystem Based Fisheries Management (EBFM).  It also enables the Management Strategy Evaluation (MSE), testing different management scenarios to ensure robust, effective policies for long-term resource health and socio-economic benefits.
+
+
+# Procedure
+
+# 1. Initial set-up
+
+In this section, we load the complete suite of R packages required to support our bio-economic modeling workflow. These libraries cover data restructuring (`dplyr`, `data.table`), spatial data manipulation (`sf`, `raster`, `terra`), automated plotting and cartography (`ggplot2`, `ggspatial`, `viridis`), and professional reporting extensions (`knitr`, `openxlsx`).
+
+```{r load dependencies, include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+Starting_time = Sys.time()
+library(chron)
+library(data.table)
+library(dplyr)
+library(fasterize)
+library(fields)
+library(ggmap)
+library(ggplot2)
+library(ggpubr)
+library(ggrepel)
+library(ggsci)
+library(ggspatial)
+library(gtsummary)
+library(gridExtra)
+library(irr)
+library(knitr)
+library(mapdata)
+library(maps)
+library(mapview)
+library(marmap)
+library(mgcv)
+library(nnls)
+library(openxlsx)
+library(patchwork)
+library(PBSmapping)
+library(prioritizr)
+library(progress)
+library(raster)
+library(reshape2)
+library(rpart)
+library(sf)
+library(stringr)
+library(terra)
+library(tidyterra)
+library(webr)
+library(viridis)
+library(png)
+library(grid)
+library(ggimage)
+library(ggdendro)
+```
+
+Here, we establish baseline configurations and key constants that dictate the simulation scale and constraints. This includes defining filter quantiles to handle data outliers. Additionally, a maximum bathymetric limit is established to omit cells exceeding realistic fishing depths.
+
+```{r, par, include=FALSE}
+
+quantile_thrB <- 0.1 # 
+quantile_Logit <- 0.05 # 
+quantile_Effort <- 0.05 # 
+quantile_effort_fleet <- 0.1#
+thr_depth <- 1000 # This is the maximum depth of cells (as assigned using marmap) allowed for the analysis
+
+```
+
+
+## 1.1 Define the range of data inputs:
+
+The preliminary step in this process is to define the range of data that will be loaded into the model, which should correspond to the specific case study that is to be analyzed. The following table sets out the parameters that may be switched in each case study.
+
+```{r table range, message=FALSE, warning=FALSE}
+
+params_df = data.frame(Attribute = c(
+      "years_to_submit",
+      "species_to_submit",
+      "gears_to_submit",
+      "CS_gsas",
+      "spatial_resolution_km"),
+    Definition = c(
+      "Year",
+      "Species",
+      "Gear",
+      "GSA of the study area",
+      "Spatial resolution (km)"),
+    Options = c("2020; 2021; 2022; 2023",
+      '"ARA"; "ARS"; "BOG"; "CBM"; "CTC"; "DGS"; "DPS"; "EDT"; "EOI"; "HKE"; "HMM"; "HOM"; "MON"; "MUR"; "MUT"; "NEP"; "SQE"; "SQM"',
+      '"DRB"; "FPO"; "GND"; "GNS"; "GTR"; "HAR"; "LHM"; "LLD"; "LLS"; "OTB"; "OTM"; "PS_"; "PTM"; "TBB"',
+      '"GSA04"; "GSA05"; "GSA06"; "GSA07"; "GSA08"; "GSA09"; "GSA10"; "GSA111"; "GSA112"; "GSA12"; "GSA13"; "GSA14"; "GSA15"; "GSA16"; "GSA17"; "GSA18"; "GSA19"; "GSA20"; "GSA21"; "GSA22"; "GSA23"; "GSA24"; "GSA25"; "GSA26"; "GSA29"',
+      "1 km; 3 km; 5 km") )
+
+kable(
+  params_df,
+  caption = "Input parameters.",
+  booktabs = TRUE,
+  longtable = TRUE
+) |>
+  kableExtra::kable_styling(full_width = FALSE)
+```
+
+
+```{r define the inputs, include= FALSE , warning=FALSE, message=FALSE}
+
+# Define the inputs
+wd_set = "C:/Users/alice/OneDrive - CNR/Documenti - MSP4Biodiversity-grp/General/WindFarm_Clean/"
+
+source("Set Ups/Set_Up_WindFarms_SoS.R")
+CS_crs = 4326
+
+
+out_dir = paste0("Sessions/Session_", Sys.Date())
+
+if (!dir.exists(out_dir)) {
+  dir.create(out_dir)
+}
+
+```
+
+## 1.2 Load general resources:
+
+We load general reference frameworks and biological datasets to contextualize our core data. This involves importing the standard FAO ASFIS species list for scientific nomenclature matching, compiling species-specific bathymetric operational ranges, and mapping the geographical coordinates of regional landing ports.
+
+```{r load resources on github, include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+
+# FAO Species Sheet
+fao3 = read.xlsx("Input file/ASFIS_sp_2019.xlsx")
+
+# Depth ranges by species
+ranges = read.csv("Input file/species_depth_range.csv")
+
+# Coordinates of the harbours
+Harbs =  read.csv("Input file/Harbs_coords.csv")
+
+```
+
+Next, we ingest the critical spatial layers defining our geographical context. This includes loading the national coastline bounds, the formal Case Study administrative boundaries (`CS_WF.shp`), high-resolution bathymetric basemaps for the Mediterranean, and the specific shapefiles designating the spatial planning layout of the offshore Wind Farm polygons.
+
+```{r load other resources, include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+mp <- map_data("world", region = c("Italy"))
+CS = read_sf("Set Ups/CS_WF.shp")
+bathy = readRDS("Input file/med_bath.sqlitebathy.rData")
+polygons_sf = st_read("Set Ups/WindFarm_Polygon.shp", quiet = TRUE) %>%  st_transform(crs = st_crs(CS_crs)) %>% mutate(id = "Wind Farm")
+
+
+```
+
+## 1.3 Load Fishery Dependent Information (FDI)
+
+The database was developed to support the management of fishing effort management regimes. The FDI database offers a comprehensive overview of fishing effort across the EU. By collecting information about fishing capacity, effort, landings, and discards, it allows for comparison between regions at a detailed level (métier, gear).
+
+**Table A.** Landings summary (Estimate landings in tonnes)
+
+**Table G.** Effort summary (Effort in fishing days without spatial dimension)
+
+```{r FDI, echo=TRUE}
+fdiA = readRDS("Input file/FDI/FDI_table_A_2020-2024.rData")
+fdiG = read.csv("Input file/FDI/EU DCF Effort.csv")
+```
+
+
+```{r load functions, include=FALSE, warning=FALSE, message=FALSE}
+# source("Functions/aggregate_df.R")
+source("Functions/genGrid.R")
+source("Functions/getLogit.R")
+source("Functions/add_WLV.R")
+source("Functions/getLandings.R")
+source("Functions/griddingEffort.R")
+source("Functions/gridDistance.R")
+source("Functions/prepareEffort.R")
+source("Functions/getCore.R")
+source("Functions/IBM2eco_AS2.R")
+source("Functions/getLPUE_AS.R")
+
+```
+
+## 1.4 Map of the study area:
+
+We import and validate the main spatial grid (5 km cell resolution) constructed for this scenario. The grid is geometrically intersected with our Case Study boundaries, and cell centroids are calculated to sample precise depths from the bathymetric raster. Cells falling directly within the prospective wind farm perimeter are systematically flagged.
+
+```{r load the grid, include=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+grid_sf = st_make_valid(read_sf("Set Ups/Grid_5km_scenario.shp")) %>% rename(id_grid = id) %>% mutate(id_grid = as.character(id_grid)) %>% 
+  st_intersection(CS) %>% 
+  st_as_sf(crs = CS_crs)  
+
+grid_sf$id_grid[which(grid_sf$WF == 1)] <- paste0(grid_sf$id_grid[which(grid_sf$WF == 1)],"_WF")
+
+grid_centroid = st_centroid(grid_sf)
+depth <- -1 * get.depth(mat = bathy, x = st_coordinates(grid_centroid)[, c("X","Y")], locator = FALSE)$depth
+grid_sf$depth = depth
+ 
+
+map_xlim = st_bbox(grid_sf)[c(1,3)]
+map_ylim = st_bbox(grid_sf)[c(2,4)]
+```
+
+
+Now, we ***generate and plot the grid with relative depth***.
+
+```{r plot the grid, include=TRUE, echo=TRUE,fig.align='center', warning=FALSE, message=FALSE}
+ggplot() +
+    geom_sf(data = grid_sf, aes(fill = depth), color = NA, lwd = 0.2) +
+    geom_sf(data = grid_sf[which(grid_sf$WF == 1),], fill = "purple", fill = NA)+
+    geom_polygon(data = mp, aes(long, lat, group = group), fill = "lightgray") +
+    theme(panel.background = element_rect(fill = "white"), 
+        legend.position = "right",
+        legend.title.position = "bottom") +
+  scale_fill_gradient("Depth (m)", low = "cyan", high = "darkblue", 
+                      na.value = "NA")+
+  xlab("Longitude") +
+  ylab("Latitude") +
+  ggtitle(paste0("Area of study with bathymetry (grid cells = ", spatial_resolution_km, " km)"))+
+  theme_test() +
+  coord_sf(xlim = map_xlim,
+           ylim = map_ylim,
+           expand = TRUE) #,
+```
+
+This bathymetric map, depicting the study area with a 5 km grid resolution, offers a clear visualization of the underwater topography. The varying depths, indicated by the color gradient from light to dark blue, suggest a complex seabed morphology. The presence of deeper areas, particularly in the central and southwestern regions, could indicate the presence of submarine canyons or other significant geological features. Conversely, the shallower areas, especially towards the northeastern boundary, may represent continental shelf regions or shallower banks.
+
+The spatial extent of the study area, as defined by the latitude and longitude coordinates, provides a valuable geographical context. The inclusion of the landmass in the northeastern section allows for a clear distinction between terrestrial and marine environments.
+
+While the 5 km grid resolution provides a broad overview, higher resolution data could potentially reveal more intricate details of the seabed. This map serves as a useful foundation for further research, such as hydrodynamic modeling, sediment transport studies, or marine habitat mapping.
+
+
+## 1.5 Species considered
+
+```{r the species, echo=FALSE, warning=FALSE, message=FALSE, fig.height= 8, fig.width=10}
+image_paths = image_names = vector(mode = "list", length = length(species_to_submit))
+for(i in 1: length(species_to_submit)){
+  image_paths[[i]] = paste0("Input file/png/", species_to_submit[i], ".png")
+image_names[[i]] <- fao3$Scientific_name[fao3$`3A_CODE` == species_to_submit[i]][1]
+}
+
+load_image_grob <- function(path) {
+  rasterGrob(readPNG(path), interpolate = TRUE)
+}
+
+image_grobs <- lapply(image_paths, load_image_grob)
+names_grobs <- lapply(image_names, function(name) textGrob(name, 
+                                                           gp = gpar(fontsize = 10, fontface = "italic")))
+combined_grobs <- mapply(function(img, nm) {
+  arrangeGrob(
+    img,
+    nm,
+    ncol = 1,
+    heights = c(4, 1)
+  )
+},
+image_grobs,
+names_grobs,
+SIMPLIFY = FALSE)
+
+grid.arrange(grobs = combined_grobs, ncol = 6)
+```
+
+
+
+
+# 2. Effort data preprocessing
+
+Prepare the spatial Effort data. Effort data for each year contain:
+
++----------------+----------------------------------------------------------------------------+
+| *Label code*   |     *Description*                                                          |
+|                |                                                                            |
+| | CFR          | | Common Fleet Register                                                    |
++----------------+----------------------------------------------------------------------------+
+| | UTC          | | Coordinated Universal Time                                               |
++----------------+----------------------------------------------------------------------------+
+| | YEAR         | |  Year of relative fishing trips                                          |
++----------------+----------------------------------------------------------------------------+
+| | MONTH        | |  Month of relative fishing trips                                         |
++----------------+----------------------------------------------------------------------------+
+| | SPEED        | | Speed of the vessels [km/h]                                              |
++----------------+----------------------------------------------------------------------------+
+| | HEADING      | | Shipping direction                                                       |
++----------------+----------------------------------------------------------------------------+
+| | TRACK        | | Fishing trip                                                             |
++----------------+----------------------------------------------------------------------------+
+| | HARBOUR      | | Harbor of affiliation                                                    |
++----------------+----------------------------------------------------------------------------+
+| | INTERPOLATED | | Binary: wheather the ping is interpolated or not                         |
++----------------+----------------------------------------------------------------------------+
+| | GSA          | | FAO Geographical Sub-Area                                                |
++----------------+----------------------------------------------------------------------------+
+| | GFCM         | |  General Fisheries Commission for the Mediterranean - GFCM               |
++----------------+----------------------------------------------------------------------------+
+| | in3nm        | | Binary: is the point in the 3NM buffer zone                              |
++----------------+----------------------------------------------------------------------------+
+| | id           | | CFR + Track                                                              |
++----------------+----------------------------------------------------------------------------+
+| | fishing      | | [0 - 1] data for fishing - no fishing track                              |
++----------------+----------------------------------------------------------------------------+
+| | depth        | | Bathymetry of the seabed                                                 |
++----------------+----------------------------------------------------------------------------+
+| | Metier       | | Fishing activity by length over all                                      |
++----------------+----------------------------------------------------------------------------+
+| | fishing_time | | Period during which the boat was actively engaged in fishing activities. |
++----------------+----------------------------------------------------------------------------+
+| | Gear         | | Prevalent fishing gear                                                   |
++----------------+----------------------------------------------------------------------------+
+| | geometry     | | Parameter of the *sf* library                                            |
++----------------+----------------------------------------------------------------------------+
+
+## 2.1 Prepare fishing track data (effort)
+This script handles the heavy preprocessing of high-frequency satellite fishing tracks (VMS/AIS data) produced by VMSbase. The routine iterates through each year, isolates specified gears within our target GSAs, and eliminates low-activity vessels using an effort quantile filter. Crucially, it masks raw Common Fleet Register (CFR) codes with anonymous identifiers to ensure strict data compliance and privacy before saving the cleaned tracking list.
+
+```{r effort processing, eval = FALSE}
+
+FishTrack_sf_list = vector(mode = "list", length = length(years_to_submit))
+FishTrack_stats = data.frame(year = years_to_submit, npoints = numeric(length(years_to_submit)))
+
+# This is the data frame of the harbours
+cfr_harbs_df = data.frame(CFR = numeric(0),
+                          HARBOUR = character(0))
+
+for(y in 1:length(years_to_submit)){
+  
+  FishTrack = readRDS(paste0("Input file/Fishing Track/", years_to_submit[y],
+                          "_Interpolated_Tracks_withFishing.rData"))
+  FishTrack$Gear = substr(FishTrack$Metier, 1, 3)
+  
+  # effort$Gear = ifelse(str_detect(effort$Gear, "_") == TRUE,
+  #                      substr(effort$Gear, 1,
+  #                             matrix(unlist(str_locate_all(effort$Gear,"_")), ncol = 2, byrow = TRUE)[,1]-1),
+  #                      effort$Gear)
+  FishTrack = FishTrack %>% filter(Gear %in% gears_to_submit)
+  
+  # First extract the harbours
+  yh = unique(FishTrack %>% filter(HARBOUR != "", GSA %in% CS_gsas) %>% dplyr::select("CFR", "HARBOUR"))
+  cfr_harbs_df = rbind(cfr_harbs_df, yh)
+  
+  FishTrack = FishTrack %>% filter(fishing_time > 0)
+  FishTrack$MONTH = factor(month.name[FishTrack$MONTH], levels = month.name)
+  FishTrack$YEAR = as.character(FishTrack$YEAR)
+  FishTrack$CFR = as.character(FishTrack$CFR)
+  
+   # Reshape the effort as sf object
+  FishTrack_sf = st_as_sf(FishTrack, coords  = c("LON", "LAT"), crs = st_crs(grid_sf))
+  st_crs(FishTrack_sf) = st_crs(grid_sf)
+  
+  
+  FishTrack_agg_CFR <- as.data.table(st_drop_geometry(FishTrack_sf))[, .(fishing_time = sum(fishing_time, na.rm = TRUE)), by = CFR]
+  
+  noCFR = FishTrack_agg_CFR %>% dplyr::filter(fishing_time < quantile(FishTrack_agg_CFR$fishing_time, quantile_Effort))
+  
+  FishTrack_sf = FishTrack_sf %>% dplyr::filter(!(CFR %in% noCFR$CFR))
+  
+  FishTrack_sf_list[[y]] = FishTrack_sf
+  FishTrack_stats[y, "npoints"] = nrow(FishTrack_sf)
+  
+  rm(FishTrack, yh)
+  gc()
+}
+
+
+saveRDS(FishTrack_sf_list , file = paste0(out_dir, "/FishTrack_sf_list.rData"))
+saveRDS(cfr_harbs_df, file = paste0(out_dir, "/cfr_harbs_df.rData"))
+
+
+# FishTrack_sf_list = readRDS(paste0(out_dir,"/FishTrack_sf_list.rData"))
+# 
+# cfr_harbs_df = readRDS(paste0(out_dir,"/cfr_harbs_df.rData"))
+
+
+FishTrack_clean = as.data.frame(st_drop_geometry(rbindlist(FishTrack_sf_list))) %>%
+  group_by(CFR) %>%
+  # filter(n_distinct(YEAR) == 4) %>%
+  ungroup()
+
+CFR_id = data.frame(CFR = as.character(unique(FishTrack_clean$CFR)))
+CFR_id$CFR_anon <- paste0("boat_", seq_len(nrow(CFR_id)))
+write.csv(CFR_id, "Set Ups/CFR_id.csv", row.names = F)
+
+
+FishTrack_clean = FishTrack_clean %>%
+  left_join(CFR_id) %>%
+  mutate(CFR = CFR_anon,
+         CFR_anon = NULL)
+
+cfr_harbs_df_clean = cfr_harbs_df %>%
+  mutate(CFR = as.character(CFR)) %>%
+  left_join(CFR_id) %>%
+  mutate(CFR = CFR_anon,
+         CFR_anon = NULL) %>%
+  drop_na()
+
+saveRDS(FishTrack_clean, "Input file/FishTrack_clean.rData")
+saveRDS(cfr_harbs_df_clean, "Input file/cfr_harbs_df_clean.rData")
+
+
+fleet_register = read.csv("Input file/Fleet register.csv", sep = ";")
+CFR_id = read.csv("Set Ups/CFR_id.csv") %>% mutate(CFR = as.character(CFR))
+
+fleet_register_clean = fleet_register %>%
+  mutate(CFR = as.character(CFR)) %>%
+  inner_join(CFR_id) %>%
+  mutate(CFR = CFR_anon,
+         CFR_anon = NULL) 
+saveRDS(fleet_register_clean, "Input file/fleet_register_clean.rData")
+
+remove(fleet_register)
+
+```
+
+## 2.2 Extract harbour from fishing tracks 
+
+To link operational dynamics to coastal communities, vessel tracking records are cross-referenced with harbor coordinates. By projecting the ports onto our active study grid, we clean and filter the data to retain only the functional linkages between active vessels and their true homeports, omitting sparse or unrepresentative records.
+
+```{r effort coverage, include=TRUE, warning=FALSE, message=FALSE}
+
+FishTrack_clean = readRDS("Input file/FishTrack_clean.rData")
+cfr_harbs_df = readRDS("Input file/cfr_harbs_df_clean.rData")
+
+harbs_df <- Harbs %>%
+  select(HARBOUR = PORT, Lon = LON, Lat = LAT) %>%
+  distinct() %>%
+  left_join(cfr_harbs_df, ., by = "HARBOUR") %>%
+  select(HARBOUR, Lon, Lat) %>%
+  distinct() %>%
+  filter(complete.cases(Lon, Lat)) %>%  
+  st_as_sf(coords = c("Lon", "Lat"), crs = CS_crs) 
+
+cfr_harbs_df$HARBOUR = toupper(cfr_harbs_df$HARBOUR)
+
+harbs_df <- harbs_df %>% 
+            st_intersection(grid_sf) %>%  
+            mutate(
+              Lon = st_coordinates(.)[, "X"],
+              Lat = st_coordinates(.)[, "Y"]) %>%          
+             select(
+                HARBOUR,
+                Lon,
+                Lat) %>%
+            st_drop_geometry()
+
+cfr_harbs_df <- cfr_harbs_df %>% 
+         filter(CFR %in% FishTrack_clean$CFR) %>% 
+         filter(HARBOUR %in% unique(harbs_df$HARBOUR))
+                
+```
+
+## 2.3 Define the final fleet with the harbour of each vessel
+
+We reconstruct the comprehensive active fishing fleet profile by quantifying active fishing days and cumulative trip hours grouped by vessel, month, and year. This activity matrix is joined with official vessel characteristics (Length Over All - LOA, and engine power) from the fleet register. Vessels are partitioned into standard Length Classes (VL) and low-activity harbors are subsetted out to yield a robust, representative fleet baseline.
+
+```{r define the fleet, warning=FALSE, message=FALSE, fig.height=5, fig.width=9, fig.align='center'}
+
+
+fleet <- cfr_harbs_df %>% 
+  filter( HARBOUR %in% harbs_df$HARBOUR) %>% 
+  distinct() %>% 
+  mutate(n = 0)
+  
+  
+fleet <- dcast(data = fleet, CFR ~ HARBOUR, value.var = "n")
+
+
+FishTrack_clean = FishTrack_clean %>% filter(CFR %in% fleet$CFR)
+
+FishTrack_clean <- FishTrack_clean %>%
+  mutate(datetime = as.POSIXct(UTC * 86400,
+                          origin = "1970-01-01",
+                          tz = "UTC"),
+    day = as.Date(datetime),
+    hour = format(datetime, "%H:%M:%S"))
+
+
+CFR_fish_day_hours <- FishTrack_clean %>%
+  st_drop_geometry() %>% 
+  arrange(CFR, datetime) %>%
+  group_by(CFR) %>%
+  mutate(
+    dt_h = as.numeric(difftime(lead(datetime),
+                               datetime,
+                               units = "hours"))
+  ) %>%
+  group_by(CFR,
+           year = year(datetime),
+           month = month(datetime)) %>%
+  summarise(
+    fishing_days = n_distinct(day),
+    fishing_hours = sum(dt_h, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+CFR_fish_day_hours = CFR_fish_day_hours %>% 
+                      mutate(MONTH = month.name[month],
+                             YEAR = as.character(year)) %>% 
+                      dplyr::select(-c(year,month))
+
+process_cfr_data <- function(cfr_id) {
+  # Monthly trip patterns
+  xi <- FishTrack_clean %>% 
+    dplyr::filter(CFR == cfr_id) %>% 
+    dplyr::distinct(MONTH, YEAR, TRACK, Gear) %>% 
+    dplyr::mutate(n = 1)
+  
+  xit <- xi %>% 
+    dplyr::group_by(MONTH, YEAR, Gear) %>% 
+    dplyr::summarise(n = sum(n), .groups = "drop")
+  
+
+  # Primary harbor
+  primary_harbor <- cfr_harbs_df %>% 
+    dplyr::filter(CFR == cfr_id) %>% 
+    dplyr::count(HARBOUR, sort = TRUE) %>% 
+    dplyr::slice(1) %>% 
+    dplyr::pull(HARBOUR)
+  
+  # Return formatted data
+  tibble::tibble(
+    CFR = cfr_id,
+    HARBOUR = primary_harbor,
+    GEAR = xit$Gear,
+    YEAR = xit$YEAR,
+    MONTH = xit$MONTH,
+    ntrip = xit$n
+  )
+}
+
+final_fleet <- purrr::map_dfr(fleet$CFR, process_cfr_data) %>% 
+  dplyr::group_by(CFR, HARBOUR, GEAR, MONTH, YEAR) %>% 
+  dplyr::summarise(ntrip = sum(ntrip), .groups = "drop")
+
+final_fleet = final_fleet %>% left_join(CFR_fish_day_hours, by = c("CFR", "MONTH", "YEAR"))
+
+
+
+# Vessel count by harbor
+cfr_by_h <- final_fleet %>% 
+  distinct(CFR, HARBOUR, YEAR) %>% 
+  group_by(YEAR) %>% 
+  count(HARBOUR, name = "nvessel") %>% 
+  arrange(nvessel)
+
+
+
+ggplot(data = cfr_by_h, aes(x = as.numeric(YEAR), y = nvessel, color = HARBOUR))+
+  geom_point()+
+  geom_line(size = 1)+
+  xlab("")+
+  theme_bw()+
+  ggtitle("Number of vessels by Harbour and Years")+
+  ylab("Number of vessels")
+  
+final_fleet %>% 
+  mutate( MONTH = factor(MONTH, levels = month.name)) %>% 
+  group_by(MONTH, HARBOUR, YEAR) %>% 
+  summarise(fishdays = sum(fishing_days), .groups = "drop") %>% 
+  ggplot(aes(x = MONTH, y = fishdays, color = HARBOUR, group = HARBOUR)) +
+  geom_point() +
+  geom_line(linewidth = 1) +
+  facet_wrap(~YEAR) +
+  theme_bw() +
+  xlab("") +
+  ylab("Fishing days")+
+  ggtitle("Number of fishing days by Harbour and Years")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+final_fleet %>% 
+  mutate( MONTH = factor(MONTH, levels = month.name)) %>% 
+  group_by(MONTH, HARBOUR, YEAR) %>% 
+  summarise(fishdays = sum(fishing_days), .groups = "drop") %>% 
+  ggplot(aes(x = HARBOUR, y = fishdays)) +
+  geom_boxplot() +
+  facet_wrap(~YEAR) +
+  theme_bw() +
+  xlab("") +
+  ylab("Fishing days")+
+  ggtitle("Number of fishing days by Harbour and Years")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Filter harbors with too few vessels
+low_days_harbors <- final_fleet %>% 
+  group_by(HARBOUR, YEAR) %>% 
+  summarise(fishdays = sum(fishing_days), .groups = "drop")
+
+q1 <- quantile(low_days_harbors$fishdays, probs = 0.20, na.rm = TRUE)
+
+low_days_harbors_filtered <- low_days_harbors %>% 
+  filter(fishdays <= q1) %>% 
+  pull(HARBOUR) %>% unique()
+
+if (length(low_days_harbors_filtered) > 0) {
+  final_fleet <- final_fleet %>% 
+    filter(!HARBOUR %in% low_days_harbors_filtered)
+}
+
+# Update cfr_by_h after filtering
+cfr_by_h <- final_fleet %>% 
+  distinct(CFR, HARBOUR, YEAR) %>% 
+  group_by(YEAR) %>% 
+  count(HARBOUR, name = "nvessel") %>% 
+  arrange(nvessel)
+
+
+# Final processing
+FishTrack_clean <- FishTrack_clean %>% 
+  filter(CFR %in% unique(final_fleet$CFR))
+
+fleet_register_clean = unique(readRDS("Input file/fleet_register_clean.rData"))
+                              
+fleet_register_clean = fleet_register_clean %>% 
+                        select(CFR, loa,power_main)
+
+
+# Join with fleet register and handle NA values
+final_fleet <- final_fleet %>%
+  mutate(CFR = as.character(CFR)) %>% 
+  left_join(fleet_register_clean, by = "CFR") %>% 
+  mutate(
+    loa = ifelse(is.na(loa), mean(loa, na.rm = TRUE), loa),
+    power_main = ifelse(is.na(power_main), mean(power_main, na.rm = TRUE), power_main),
+    CFR = as.character(CFR)
+  )
+
+final_fleet = final_fleet %>% 
+ mutate(VL = cut(loa,
+             breaks = c(0, 6, 12, 18, 24, 40, Inf),
+             labels = c("VL0006", "VL0612", "VL1218", "VL1824", "VL2440", "VL40XX"),
+             right = FALSE))
+
+## tranform power main with zero value
+
+final_fleet <- final_fleet %>% 
+  group_by(VL) %>% 
+  mutate(
+    power_main = ifelse(
+      power_main == 0,
+      mean(power_main[power_main > 0], na.rm = TRUE),
+      power_main)) %>%   ungroup()
+
+
+# Prepare harbor data
+harbs_df <- harbs_df %>% 
+  dplyr::filter(HARBOUR %in% final_fleet$HARBOUR) %>% 
+  dplyr::distinct() %>% 
+  dplyr::left_join(cfr_by_h, by = "HARBOUR")
+
+
+harbs_df_sf = st_as_sf(harbs_df, coords = c("Lon","Lat"), crs = CS_crs)
+
+
+# Create final fleet details with size categories
+
+# Calculate fishing capacity
+fishing_capacity <- final_fleet %>% 
+  group_by(HARBOUR, GEAR, VL, YEAR) %>% 
+  summarise(n_boat_tot = n_distinct(CFR), .groups = "drop")
+
+final_fleet_detail_loa_power = final_fleet %>% 
+                                  group_by(CFR,HARBOUR,GEAR,VL) %>% 
+                                  summarise(loa = mean(loa),
+                                            power_main = mean(power_main))
+
+final_fleet_detail_fishdays_hours = final_fleet %>% 
+                         distinct(CFR,HARBOUR,GEAR,MONTH,YEAR,VL,fishing_days,fishing_hours) 
+
+saveRDS(FishTrack_clean , file = paste0(out_dir, "/FishTrack_clean.rData"))
+saveRDS(final_fleet , file = paste0(out_dir, "/final_fleet.rData"))
+saveRDS(fishing_capacity , file = paste0(out_dir, "/fishing_capacity.rData"))
+saveRDS(final_fleet_detail_fishdays_hours , file = paste0(out_dir, "/final_fleet_detail_fishdays_hours.rData"))
+saveRDS(final_fleet_detail_loa_power , file = paste0(out_dir, "/final_fleet_detail_loa_power.rData"))
+
+```
+
+### 2.3.1 Final fishing fleet 
+```{r  fig.height = 6, fig.width=8,fig.align='center', echo=FALSE, warning=FALSE, message=FALSE}
+
+harbs_df_sf$lab = paste0(harbs_df_sf$HARBOUR, ", n. vessel = ", harbs_df_sf$nvessel)
+
+fmap = ggplot() +
+  geom_sf(data = grid_sf, aes(fill = depth), color = NA) +
+  scale_fill_gradient("Depth (m)", low = "lightblue", high = "darkblue", 
+                      na.value = "NA") +
+  ggnewscale::new_scale_fill() +
+
+  ggpattern::geom_sf_pattern(
+    data = polygons_sf,
+    pattern = "stripe",
+    fill = "white",
+    colour = "black",
+    pattern_colour = "yellow",
+    pattern_density = 0.5,
+    pattern_spacing = 0.02
+  ) +
+  ggnewscale::new_scale_fill() +
+   ggnewscale::new_scale_color() +
+  geom_polygon(data = mp, aes(long, lat, group = group), fill = "lightgray") +
+  geom_sf(data = harbs_df_sf %>% group_by(HARBOUR) %>% mutate(nvessel = median(nvessel)), aes(size = nvessel, color = nvessel), fill = "black",
+          inherit.aes = FALSE) +
+  scale_color_distiller(palette = "YlOrBr")+
+
+  xlab("Longitude") +
+  ylab("Latitude") +
+  coord_sf(
+    xlim = st_bbox(grid_sf)[c(1,3)],
+    ylim = st_bbox(grid_sf)[c(2,4)],
+    expand = TRUE
+  ) +
+
+  geom_label_repel(
+    data = harbs_df_sf %>% cbind(st_coordinates(.)) %>% st_drop_geometry() %>%  dplyr::select(HARBOUR,X,Y) %>% distinct(),
+    aes(x = X, y = Y, label = HARBOUR),
+    size = 3, fontface = "bold"
+  ) +
+  theme_test() +
+  theme(
+    legend.position = "right",
+    # legend.box = "horizontal",
+    legend.key.width = unit(1, "cm")
+  ) +
+  ggtitle("Map of the harbours")
+
+fmap
+
+ggsave(fmap, filename = paste0(out_dir,"/Results/Fig1.jpeg"),width = 24, height = 16, units = "cm", dpi = 300)
+
+```
+
+```{r  fig.height = 5, fig.align='center', fig.width=10, echo=FALSE, warning=FALSE, message=FALSE}
+
+gfc = ggplot(data = final_fleet_detail_fishdays_hours, aes(x = VL, y = fishing_days)) +
+  geom_boxplot()+
+  facet_wrap(~ HARBOUR, ncol = 2) + 
+  theme_test() +
+  theme(legend.position = "none") +
+  ylab("Fishing days") +
+  xlab("")+
+  ggtitle("Fishing days by harbour and Gear")
+  
+
+
+gv = ggplot(data = cfr_by_h, aes(y = reorder(HARBOUR, nvessel), x = nvessel, fill = YEAR)) + 
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_test() +
+  xlab("Number of vessels") +
+  ylab("")+
+  ggtitle("Number of vessels by port")
+
+fves = grid.arrange(gv, gfc, ncol = 2)
+
+ggsave(fves, filename = paste0(out_dir,"/Results/Fig1a.jpeg"),width = 22, height = 16, units = "cm", dpi = 300)
+
+
+
+harbour_month_year_summary <- final_fleet_detail_fishdays_hours %>%
+  group_by(YEAR, MONTH, HARBOUR, VL) %>%
+  summarise(
+    n_boats = n_distinct(CFR),
+    fishing_days = sum(fishing_days, na.rm = TRUE),
+    fishing_hours = sum(fishing_hours, na.rm = TRUE),
+    .groups = "drop"  )
+
+write.xlsx(harbour_month_year_summary, paste0(out_dir,"/Results/Vessels_days_hours.xlsx"))
+
+```
+
+## 2.4 Overlap fishing track data on the grid
+
+Continuous fishing tracks are converted into a discrete spatial distribution by intersecting tracking coordinates with the 5 km study grid cells. This step allows us to transition from raw trajectories to pixel-level aggregations of monthly fishing hours and operational days for each distinct vessel group.
+
+```{r effort gridding, include=TRUE, warning=FALSE, message=FALSE}
+FishTrack_clean = FishTrack_clean %>%  st_as_sf()
+FishTrack_clean = left_join(FishTrack_clean,unique(final_fleet_detail_fishdays_hours[,c("CFR","VL", "YEAR")]))
+FishTrack_clean = FishTrack_clean %>%  mutate(VL = droplevels(VL))
+
+FishTrack_sf_gridded_list <- FishTrack_clean  %>%  split(FishTrack_clean$YEAR)
+
+FishTrack_sf_gridded_list <- purrr::map(FishTrack_sf_gridded_list, ~{
+  filter(.x, CFR %in% unique(final_fleet$CFR)) %>% 
+    st_join(grid_sf["id_grid"]) %>% 
+    drop_na()
+})
+
+FishTrack_clean <- do.call(rbind, FishTrack_sf_gridded_list)
+
+
+saveRDS(FishTrack_sf_gridded_list , file = paste0(out_dir, "/FishTrack_sf_gridded_list.rData"))
+saveRDS(FishTrack_clean , file = paste0(out_dir, "/FishTrack_clean.rData"))
+
+remove(FishTrack_sf_list)
+
+gc()
+
+
+FishTrack_fleet = FishTrack_clean %>% 
+                  st_drop_geometry %>% 
+                  arrange(CFR, datetime) %>%
+                  group_by(CFR) %>%
+                  mutate(dt_h = as.numeric(difftime(lead(datetime),
+                                               datetime,
+                                               units = "hours")),
+                         TRACK = as.character(paste0("C",TRACK))) %>%
+                  group_by(CFR,YEAR,MONTH,VL,day) %>% 
+                  summarise(n_TRACK  = n_distinct(TRACK),
+                             fishing_hours = sum(dt_h, na.rm = TRUE), .groups = "drop")
+  
+
+FishTrack_grid = FishTrack_clean %>% 
+                  st_drop_geometry %>% 
+                  arrange(CFR, datetime) %>%
+                  group_by(CFR) %>%
+                  mutate(dt_h = as.numeric(difftime(lead(datetime),
+                                               datetime,
+                                               units = "hours")),
+                         TRACK = as.character(paste0("C",TRACK))) %>%
+                  group_by(CFR,YEAR,MONTH,VL,id_grid) %>% 
+                  summarise(n_TRACK = n_distinct(TRACK),
+                            fishing_days = n_distinct(day),
+                            fishing_hours = sum(dt_h, na.rm = TRUE),
+                            .groups = "drop")
+
+saveRDS(FishTrack_fleet, paste0(out_dir, "/Fleet_Track_per_day.Rdata"))
+saveRDS(FishTrack_grid, paste0(out_dir, "/Fleet_Track_grid_days_hours.Rdata"))
+
+```
+
+## 2.5 Calculate effective effort (power_main \* fishing_days)
+
+Effective fishing effort is defined as the product of a vessel's nominal engine power (kW) and its active fishing days within a given grid cell. This section aggregates this proxy across the grid and calculates the specific proportions of vessels and effort directly operating inside the proposed Wind Farm boundary compared to the surrounding open grounds.
+
+```{r add LOA by vessel and aggregate the effort, include=TRUE, warning=FALSE, message=FALSE, fig.width= 10, fig.height=10}
+
+effort_gridded_agg_list = purrr::imap(FishTrack_sf_gridded_list, ~{
+  .x %>%
+    st_drop_geometry() %>%
+    group_by(CFR, MONTH, Gear, id_grid, VL) %>%
+     summarise(fishing_days = n_distinct(day), .groups = "drop") %>%
+    mutate(power_main = final_fleet_detail_loa_power$power_main[match(CFR, final_fleet_detail_loa_power$CFR)]) %>%
+    mutate(effort = power_main * fishing_days) %>% 
+    mutate(YEAR = .y)
+})
+
+                                    
+      
+effort_gridded_all = do.call(rbind, effort_gridded_agg_list) %>% drop_na()
+  
+effort_gridded_all = effort_gridded_all %>%  
+                      group_by(CFR, VL, YEAR) %>% 
+                      # filter(n_distinct(YEAR) == 4) %>% 
+                      ungroup()
+
+df <- effort_gridded_all %>%
+  mutate(
+    WF = ifelse(grepl("[0-9]+_WF$", id_grid), "yes", "no")  )
+
+ff = final_fleet_detail_fishdays_hours %>% 
+        group_by(CFR, HARBOUR, VL, YEAR) %>% 
+        summarise(n = n_distinct(HARBOUR)) %>%
+        ungroup()
+
+tab <- df %>% 
+  left_join(ff) %>% 
+  select(CFR, WF, HARBOUR, VL, YEAR) %>% 
+  distinct() %>% 
+  group_by(HARBOUR, VL, YEAR) %>% 
+  summarise(
+    total = n_distinct(CFR),
+    yes_n = n_distinct(CFR[WF == "yes"]),
+    .groups = "drop"
+  ) %>% 
+  mutate(
+    label = ifelse(yes_n > 0,
+                   paste0(total, " (", yes_n, ")"),
+                   as.character(total))
+  )
+
+tab_final <- tab %>% 
+  select(YEAR, HARBOUR, VL, label) %>% 
+  pivot_wider(
+    names_from = YEAR,
+    values_from = label,
+    values_fill = "0"
+  ) %>% 
+  arrange(HARBOUR)
+
+write.xlsx(tab_final, paste0(out_dir,"/Results/Table_Fig4.xlsx"))
+
+kable(tab_final, caption = "Number of vessels by Harbour, Years and Length Class\n Vessels in the Wind Farm ()")
+
+```
+
+
+```{r gvess, warning=FALSE, message=FALSE, echo=FALSE, fig.width= 10, fig.height=10}
+## Including Wind Farm 
+gvess =
+  df %>%
+  left_join(ff) %>%
+  select(CFR, WF, HARBOUR, VL, YEAR) %>%
+  distinct() %>%
+  group_by(HARBOUR, VL, WF, YEAR) %>%
+  summarise(
+    n_vessel = n_distinct(CFR)) %>%
+  ggplot(aes(x = tidytext::reorder_within(HARBOUR, -n_vessel, VL), y = n_vessel, fill = WF)) +
+  geom_bar(stat = "identity") +
+  theme_test() +
+  scale_fill_manual("Wind Farm",values = c("steelblue", "orange"),
+                            labels = c("Out", "In")) +
+  ylab("Number of vessels") +
+  xlab("Harbour")+
+   geom_text(
+    aes(label = n_vessel),
+    position = position_stack(vjust = 0.5),
+    color = "white",
+    size = 3
+  ) +
+  tidytext::scale_x_reordered() +
+  ggtitle("Number of vessels")+
+  facet_wrap(~ VL + YEAR, scales = "free") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+ggsave(gvess, filename = paste0(out_dir,"/Results/Fig4.jpeg"),width = 28, height = 24, units = "cm", dpi = 300)
+
+print(gvess) 
+
+```
+
+
+### 2.5.1 Check effort with FDI Effort (Table G)
+
+To validate the reliability of our downscaled VMS tracking effort, we implement an external consistency check against official European FDI aggregate effort records (Table G). Subsequently, we compute a quarter-specific tuning rate to scale our gridded models to match official regional effort totals.
+
+```{r check effort,  warning=FALSE, message=FALSE, fig.height=4, fig.width= 8}
+
+fdi_effort = fdiG %>% filter(Country == "Italy",
+                             Year %in% years_to_submit,
+                             gear_type %in% gears_to_submit,
+                             sub_region %in% CS_gsas,
+                             Vessel.Length.Category %in% unique(effort_gridded_all$VL)) %>% 
+                rename(Gear = gear_type , VL = Vessel.Length.Category, YEAR = Year ) %>%
+                mutate(Quarter = as.character(Quarter), 
+                       Total.kW.days.at.Sea = as.numeric(Total.kW.days.at.Sea),
+                       YEAR = as.character(YEAR)) %>% 
+                group_by(Quarter,Gear, VL, YEAR ) %>% 
+                summarise(FDI_sum_effort = sum(Total.kW.days.at.Sea, na.rm = T)) %>% 
+                      ungroup()
+                             
+effort_check = effort_gridded_all %>% 
+                  group_by(MONTH,Gear, VL, YEAR ) %>% 
+                  summarise(effort_tot = sum(effort)) %>% 
+                 mutate(Quarter = case_when(
+                        MONTH %in% c("January", "February", "March") ~ 1,
+                        MONTH %in% c("April", "May", "June") ~ 2,
+                        MONTH %in% c("July", "August", "September") ~ 3,
+                        MONTH %in% c("October", "November", "December") ~ 4 )) %>% 
+                ungroup() %>% 
+                group_by(Quarter,Gear, VL, YEAR ) %>% 
+                  summarise(effort_tot_sum = sum(effort_tot)) %>%
+  mutate(Quarter = as.character(Quarter)) %>% 
+                  left_join(fdi_effort)
+
+
+ggcomp_eff = effort_check %>% 
+ggplot(aes(x = FDI_sum_effort, y = effort_tot_sum))+
+  geom_point()+
+  geom_smooth(method = "lm")+
+  facet_wrap(~ VL, scales = "free")+
+  ggpubr::stat_cor(
+    method = "pearson",
+    label.x.npc = "left",
+    label.y.npc = "top",
+    aes(label = paste(..p.label.., ..rr.label.., sep = "~`,`~"))
+  ) +
+  theme_bw()+
+  ggtitle("Check Effort with FDI data")
+
+effort_check$rate = effort_check$FDI_sum_effort/effort_check$effort_tot_sum
+if(length(which(is.na(effort_check$rate)))>0) 
+     effort_check$rate[which(is.na(effort_check$rate))] <- 1
+
+
+print(ggcomp_eff)  
+
+
+effort_gridded_all_list  <- split(effort_gridded_all, effort_gridded_all$YEAR)
+
+for(y in 1:length(years_to_submit)){
+  effort_gridded_all_y = effort_gridded_all_list[[y]]
+  effort_gridded_all_y = effort_gridded_all_y %>% 
+                               mutate(Quarter = as.character(case_when(
+                                 MONTH %in% c("January", "February", "March") ~ 1,
+                                 MONTH %in% c("April", "May", "June") ~ 2,
+                                 MONTH %in% c("July", "August", "September") ~ 3,
+                                 MONTH %in% c("October", "November", "December") ~ 4 ))) %>% 
+                                 left_join(effort_check)
+  
+  
+effort_gridded_all_y$effort_tune = effort_gridded_all_y$effort * effort_gridded_all_y$rate
+
+effort_gridded_all_list[[y]] = effort_gridded_all_y %>% dplyr::select(-c(effort_tot_sum,FDI_sum_effort,rate))
+}
+
+ggsave(ggcomp_eff, filename = paste0(out_dir,"/Results/FigComp_Effort.jpeg"),width = 28, height = 18, units = "cm", dpi = 300)
+```
+
+
+### 2.5.2 Plot gridded effort by gear and month
+
+Following the spatial adjustment and mapping of effort, the calibrated long-format effort records are cast into a wide-format matrix. This transformation structures the spatial cells as columns, which is a structural prerequisite for the mathematical optimization routines utilized in the subsequent LPUE downscaling phase.
+
+```{r map effort, fig.width= 8, fig.height= 10, fig.align= "center",  warning=FALSE, message=FALSE, echo=FALSE}
+
+effort_gridded_all = do.call(rbind, effort_gridded_all_list)
+
+final_fleet_detail = final_fleet_detail_loa_power %>% 
+                      dplyr::select(CFR,VL) %>% 
+                      mutate(VL = droplevels(VL))
+
+effort_gridded_all_harbs = left_join(effort_gridded_all, final_fleet_detail)
+
+
+effort_gridded_sum = effort_gridded_all_harbs %>% 
+                        group_by(id_grid, Gear, HARBOUR, Quarter, VL, YEAR) %>% 
+                        summarise(effort = sum(effort_tune))
+
+
+effort_gridded_sum$WF = sub(".*_", "", effort_gridded_sum$id_grid)
+
+effort_gridded_sum$WF[which(effort_gridded_sum$WF != "WF")] = "EX"
+
+
+effort_sf_gridded_sum = st_as_sf(left_join(effort_gridded_sum, grid_sf[,c("id_grid", "depth")], by = "id_grid"))
+
+
+
+ feff = effort_sf_gridded_sum %>% 
+      mutate(Quarter = case_when(
+                          Quarter %in% c(1)  ~ "Winter",
+                          Quarter %in% c(2)   ~ "Spring",
+                          Quarter %in% c(3)   ~ "Summer",
+                          Quarter %in% c(4) ~ "Autumn")) %>% 
+   group_by(id_grid,Gear,VL, Quarter) %>% 
+   summarise(effort_mean = mean(effort), .groups = "drop") %>% 
+ ggplot() +
+  geom_polygon(data = mp, aes(long, lat, group = group), fill = "lightgray") +
+  geom_sf(aes(fill = effort_mean), color = NA) +
+     scale_fill_distiller("Effort \n(kW * fdays)",
+                         palette = "Spectral", direction = -1) +
+   coord_sf(
+    xlim = st_bbox(grid_sf)[c(1,3)],
+    ylim = st_bbox(grid_sf)[c(2,4)],
+    expand = TRUE
+  ) +
+          xlab("Longitude") +
+          ylab("Latitude") +
+    facet_wrap(~ VL + Quarter, ncol = 4)+
+    ggtitle("Map of average fishing effort by vessel length")+
+    theme_test()+
+     theme(legend.position = "bottom",  
+            plot.title = element_text(size = 12),
+           axis.text = element_text(size = 6),
+           panel.spacing = unit(0, "cm"),
+           legend.key.width = unit(2, "cm")) 
+  
+print(feff)
+    
+    
+ggsave(feff, filename = paste0(out_dir,"/Results/Fig3.jpeg"),width = 22, height = 20, units = "cm", dpi = 300)
+
+tabfig3 = effort_sf_gridded_sum %>% 
+           drop_na() %>% 
+           st_drop_geometry() %>% 
+           group_by(HARBOUR, Quarter, VL,WF) %>% 
+           summarise(effort_mean = round(mean(effort),2),.groups = "drop")
+           
+            
+tab_final3 <- tabfig3 %>% 
+  pivot_wider(
+    names_from = WF,
+    values_from = effort_mean ) 
+
+tab_final3$WF[is.na(tab_final3$WF)] <- 0
+
+write.xlsx(tab_final3, paste0(out_dir,"/Results/Table_Fig3.xlsx"))
+
+effort_gridded_all = effort_gridded_all %>% 
+                      rename(effort_fishtrack = effort,
+                             effort = effort_tune)
+
+effort_gridded_all_list = split(effort_gridded_all, effort_gridded_all$YEAR)
+
+remove(effort_gridded_agg_list)
+
+```
+
+
+Subsequently, the gridded fishing effort is transformed into a wide format, with a single cell allocated to each column. This is a crucial step in the estimation of the LPUE.
+
+```{r Reshaping effort to wide, include=TRUE, warning=FALSE, message=FALSE}
+
+effort_sf_gridded_list =  effort_gridded_all_list
+
+effort_gridded_list_wide = vector(mode = "list", length = length(years_to_submit))
+
+for(y in 1:length(years_to_submit)){
+
+  # Extract and aggregate
+  ey = st_drop_geometry(effort_sf_gridded_list[[y]])[, c("CFR", "YEAR", "MONTH","VL",
+                                                         "Gear", "id_grid", "effort")]
+  ey = aggregate(data = ey, effort ~ ., FUN = "sum", na.rm = TRUE)
+
+  # Reshape to wide format
+  eyw = reshape2::dcast(data = ey, CFR + YEAR + MONTH + VL+ Gear ~ id_grid, value.var = "effort")
+  effort_gridded_list_wide[[y]] = eyw
+}
+```
+
+
+# 3. Landings (or catch) data preprocessing
+
+The second primary modeling block focuses on ingesting and processing commercial logbook datasets. Raw landing weights (in kilograms) are isolated for the target commercial species, selected gears, and specific Geographical Sub-Areas (GSAs). Vessel codes are matched with our fleet register identifiers to maintain anonymity while linking catch volumes to corresponding vessel size metrics.
+
+```{r landings processing, message= FALSE, warning=FALSE}
+
+logbook_list = vector(mode = "list", length = length(years_to_submit))
+logbook_stats = data.frame(year = years_to_submit, npoints = numeric(length(years_to_submit)))
+CFR_id = read.csv("Set Ups/CFR_id.csv") %>% mutate(CFR = as.character(CFR))
+
+for(y in 1:length(years_to_submit)){
+
+  # Load the input related to Landings
+  logbook <- unique(readRDS(paste0("Input file/Logbook/", years_to_submit[y], "_Monthly_Merged_LB.rData"))) %>% mutate(CFR = as.character(CFR))
+  if(length(which(logbook$GSA_LB == "11.1"))>0)
+     logbook$GSA_LB[which(logbook$GSA_LB == "11.1")] = "111"
+   if(length(which(logbook$GSA_LB == "11.2"))>0)
+     logbook$GSA_LB[which(logbook$GSA_LB == "11.2")] = "112"
+
+  logbook_y = logbook %>%
+                left_join(CFR_id) %>%
+                mutate(CFR = CFR_anon,
+                       CFR_anon = NULL) %>%
+                      drop_na() %>%
+               filter(Year == years_to_submit[y],
+                 CFR %in% final_fleet$CFR,
+                 Species %in% species_to_submit,
+                 Gear %in% gears_to_submit,
+                 GSA_LB %in% as.character(as.numeric(str_remove_all(CS_gsas, "GSA")))) %>%
+                 rename(Mably = Kg, year = Year, gear_type = Gear, species = Species, sub_region = GSA_LB) %>%
+                  mutate(CFR = as.character(CFR)) %>%
+                left_join(unique(final_fleet_detail[,c("CFR","VL")]))
+
+  logbook_y$sub_region = paste0("GSA", logbook_y$sub_region)
+  logbook_list[[y]] = logbook_y
+
+ }
+
+logbook_ally = as.data.frame(do.call(rbind,logbook_list))
+
+saveRDS(logbook_ally, "Input file/logbook_clean.rData")
+
+
+```
+
+## 3.1 Landings coverage by CS
+
+```{r landing coverage, warning=FALSE, message=FALSE, fig.align='center', fig.width= 9, fig.height= 5}
+logbook_ally = readRDS("Input file/logbook_clean.rData")
+logbook_coverage = reshape2::melt(table(logbook_ally$year,
+                                         logbook_ally$VL,
+                                        logbook_ally$Month, 
+                                         logbook_ally$gear_type))
+colnames(logbook_coverage) = c("Year","VL", "Month", "Gear", "value")
+
+logbook_coverage$MONTH = month.name[logbook_coverage$Month]
+logbook_coverage$MONTH = factor(logbook_coverage$MONTH, 
+                                 levels = c("January","February","March","April", "May", "June", "July", "August", "September", "October", "November", "December"))
+
+logbook_coverage = logbook_coverage %>% 
+                       mutate(
+                        season = case_when(
+                          Month %in% c(12, 1, 2)  ~ "Winter",
+                          Month %in% c(3, 4, 5)   ~ "Spring",
+                          Month %in% c(6, 7, 8)   ~ "Summer",
+                          Month %in% c(9, 10, 11) ~ "Autumn"))
+
+print(logbook_coverage %>% 
+    mutate(Year = as.character(Year)) %>% 
+  ggplot(aes(x = season, y = value, fill = Year)) + 
+        geom_boxplot() +
+        facet_wrap(~ VL) + 
+        theme_test() +
+        theme(legend.position = "right", axis.text.x = element_text(angle = 45, vjust = 1,hjust = 1)) +
+        ggtitle("Logbook coverage by season") + 
+        ylab("Number of records"))
+```
+
+## 3.2 Check with FDI data (Table A) for consistency
+
+Mirroring our effort validation, we perform a strict validation check on commercial catches by cross-referencing our logbook sample against official FDI Landings totals (Table A). By evaluating the relationship across species, quarters, and gears, we derive robust correction ratios (`rate`) to scale up logbook samples, compensating for under-reporting or missing logs and ensuring compatibility with macro-regional statistics.
+
+```{r landings processing 2, include=TRUE, warning=FALSE, message=FALSE,fig.align='center',fig.width=8, fig.height=12}
+# Check with FDI A
+df_prod_FDI <- fdiA %>% 
+               filter(species %in% species_to_submit,
+                                    year %in% years_to_submit,
+                                    sub_region %in% CS_gsas,
+                                    country_code == "ITA",
+                                    gear_type %in% gears_to_submit,
+                                    vessel_length %in% c("VL1218", "VL1824", "VL2440", "VL40XX")) %>% 
+                                    rename(VL = vessel_length)
+
+df_prod_FDI <- df_prod_FDI %>% 
+                group_by(year,gear_type, species , sub_region , VL) %>% 
+                summarise(totwghtlandg = sum(totwghtlandg, na.rm = T),
+                          totvallandg = sum(totvallandg, na.rm = T),.groups = "drop") %>% 
+                 mutate(FDI_kg = totwghtlandg * 1000,
+                      Price_t = round(totvallandg/totwghtlandg,3),
+                      Price_Kg = round(Price_t / 1000,3))
+ 
+                       
+logbook_ally_agg = logbook_ally %>% 
+                    group_by(year,gear_type, species , sub_region , VL) %>% 
+                    summarise(Logbook_kg = round(sum(Mably, na.rm = TRUE),3),.groups = "drop")
+  
+  
+df_compare = full_join(logbook_ally_agg, df_prod_FDI)
+
+df_compare$rate = df_compare$FDI_kg/df_compare$Logbook_kg
+if(length(which(is.na(df_compare$rate)))>0) 
+  df_compare$rate[which(is.na(df_compare$rate))] <- 1
+
+
+dsub <- df_compare 
+  
+panel_limits <- dsub %>%
+    group_by(species) %>%
+    summarize(
+      xmin = min(Logbook_kg, na.rm = TRUE),
+      xmax = max(Logbook_kg, na.rm = TRUE),
+      ymin = min(FDI_kg, na.rm = TRUE),
+      ymax = max(FDI_kg, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  png_coords <- panel_limits %>%
+    mutate(
+      x = xmin + 0.95 * (xmax - xmin),
+      y = ymin + 0.05 * (ymax - ymin),
+      silhouette = paste0("Input file/png/", species, ".png")
+    )
+  
+  gcomp <- ggplot(data = dsub, aes(x = FDI_kg, y = Logbook_kg)) + 
+    geom_point(pch = 21, size = 3) + 
+    geom_smooth(method = "lm") + 
+    facet_wrap(~ species, scales = "free", drop = FALSE) + 
+    theme_test() + 
+    ylab("Logbook (Kg)") + 
+    xlab("FDI (Kg)") + 
+    ggtitle(paste0("Comparison between FDI and Logbook data ")) +
+    theme(
+      legend.position = "bottom",
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)
+    )
+  
+  gcomp <- gcomp + 
+    geom_image(
+      data = png_coords,
+      aes(x = x, y = y, image = silhouette),
+      inherit.aes = FALSE,
+      size = 0.4
+    )
+  
+  print(gcomp)
+
+
+df_rate = df_compare %>% 
+            group_by(gear_type , VL, year , species) %>% 
+            summarise(rate = mean(rate))
+                    
+
+
+landings_list  <- split(logbook_ally, logbook_ally$year)
+# Tune landings
+for(y in 1:length(years_to_submit)){
+  landings_y = landings_list[[y]]
+
+  landings_y = left_join(landings_y, df_rate)
+  
+  landings_y$Kg = landings_y$Mably * landings_y$rate
+  
+  
+  landings_y = landings_y %>% dplyr::select(year,
+                                     Month,
+                                     CFR,
+                                     gear_type,
+                                     Metier,
+                                     VL,
+                                     species,
+                                     sub_region,
+                                     Kg)
+  colnames(landings_y) = c("Year", "Month", "CFR", "Gear", "Metier", "VL", "Species", "GSA_LB", "Kg")
+  landings_list[[y]] = landings_y
+}
+
+ggsave(gcomp, filename = paste0(out_dir,"/Results/FigComp_Landings.jpeg"),width = 28, height = 28, units = "cm", dpi = 300)
+```
+
+### 3.2.1 Plot aggregate landings
+
+```{r plot land, fig.align= "center", warning = F, message = F, fig.height=8, fig.width=12, fig.align='center', echo=FALSE}
+
+### Summary plot for landing by years
+
+landings_agg = as.data.frame(do.call(rbind,landings_list))
+
+landings_agg <-  landings_agg %>% 
+                      mutate(season = case_when(
+                          Month %in% c(12, 1, 2)  ~ "Winter",
+                          Month %in% c(3, 4, 5)   ~ "Spring",
+                          Month %in% c(6, 7, 8)   ~ "Summer",
+                          Month %in% c(9, 10, 11) ~ "Autumn")) %>% 
+                    group_by(Year, Species, Gear, season, VL) %>% 
+                    summarize(Kg = sum(Kg, na.rm = TRUE)) %>% 
+                    group_by(Species, Gear, season, VL) %>% 
+                    summarize(Kg = mean(Kg, na.rm = TRUE)) %>% 
+                    mutate(name = paste0(
+                      fao3$Scientific_name
+                      [match(Species, fao3$`3A_CODE`)],
+                          " (", Species, ")"))
+
+
+glg = ggplot(data = landings_agg, 
+             aes(x = tidytext::reorder_within(Species, -Kg, season), y = Kg, fill = VL)) + 
+  geom_bar(stat = "identity") +
+  theme_test() +
+  ylab("Kg") +
+  xlab("")+
+  tidytext::scale_x_reordered() +
+  scale_y_continuous(labels = scales::comma) +
+  ggtitle("Landing by species and season")+
+  facet_wrap(~ season , scales = "free", nrow = 3) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+ggsave(glg, filename = paste0(out_dir,"/Results/Fig2.jpeg"),width = 28, height = 20, units = "cm", dpi = 300)
+
+print(glg)
+
+
+```
+
+# 4. LPUE estimation
+
+With clean, harmonized layers of spatial effort and validated landing weights, we proceed to estimate high-resolution Landings Per Unit Effort (LPUE). This process determines the spatial productivity of the fishing grounds by resolving where catches were likely extracted based on the observed distribution of fishing effort.
+
+## 4.1 Initial estimation
+
+We implement a multi-loop optimization routine that processes records by species, year, gear, length class, and month. The script applies biological constraints using species-specific depth grounds and filters out accidental or non-target trips via log-transformed quantile thresholds. 
+
+Because commercial logbooks record total landings (`Kg`) as a monthly aggregated per vessel without explicit geographical tracking, this routine applied a proportional spatial allocation algorithm using VMS/AIS effort as a proxy. 
+
+The routine identified the spatial grid columns, replaced missing values, and computed the total cumulative effort exerted by each vessel across all cells. It then distributed the aggregated logbook landings to individual grid cells based on the proportion of local-to-total fishing effort (`Kg * effort_cell / effort_tot`). 
+
+
+```{r logit and nnls for lpue estimation,  warning=FALSE, message=FALSE,  fig.width=10, fig.height=6}
+
+# Set up the data frame for the LPUE
+
+df_lpue = data.frame(YEAR = numeric(0),
+                     species = character(0),
+                     MONTH = factor(levels = month.name),
+                     VL = character(0),
+                     Gear = character(0),
+                     id_grid = character(0),
+                     LPUE_grid = numeric(0))
+
+
+# Define the depth range 
+id_grid_potential_grounds = vector(mode = "list", length = length(species_to_submit))
+
+for(s_index in 1:length(species_to_submit)) {
+  minD = ranges$minD[which(ranges$Species == species_to_submit[s_index])]
+  maxD = ranges$maxD[which(ranges$Species == species_to_submit[s_index])]
+  id_grid_potential_grounds[[s_index]] <- grid_sf %>%
+    filter(depth <= maxD, depth >= minD, 
+           id_grid %in% unique(effort_gridded_all$id_grid))
+  
+}
+
+# =========================================================
+# STORAGE OUTPUT
+# =========================================================
+
+lpue_list <- list()
+counter <- 1
+
+
+total_iterations <- length(species_to_submit) * length(years_to_submit)
+
+# pb <- txtProgressBar(
+#   min = 0,
+#   max = total_iterations,
+#   style = 3
+# )
+
+progress_counter <- 0
+
+# =========================================================
+# LOOP SPECIES
+# =========================================================
+
+for(s_index in seq_along(species_to_submit)) {
+  
+  species_i <- species_to_submit[s_index]
+  
+  # grounds specie
+  grounds_i <- id_grid_potential_grounds[[s_index]]$id_grid
+  
+  # =======================================================
+  # LOOP YEARS
+  # =======================================================
+  
+  for(y in seq_along(years_to_submit)) {
+    
+    year_i <- years_to_submit[y]
+    
+    # -----------------------------------------------------
+    # UPDATE PROGRESS BAR
+    # -----------------------------------------------------
+    
+    progress_counter <- progress_counter + 1
+    
+    # setTxtProgressBar(pb, progress_counter)
+    
+    # cat(
+    #   "\nSpecies:", species_i,
+    #   "| Year:", year_i,
+    #   "| Progress:",
+    #   round(progress_counter / total_iterations * 100, 1),
+    #   "%\n"
+    # )
+    
+    # -----------------------------------------------------
+    # LANDINGS
+    # -----------------------------------------------------
+    
+    Ls <- landings_list[[y]] %>%
+      dplyr::filter(
+        Species == species_i,
+        Gear %in% gears_to_submit,
+        GSA_LB %in% CS_gsas
+      ) %>%
+      tidyr::drop_na()
+    
+    # skip se vuoto
+    if(nrow(Ls) == 0) next
+    
+    # aggregazione
+    Ls <- Ls %>%
+      dplyr::group_by(CFR, Year, Month, VL) %>%
+      dplyr::summarise(
+        Kg = sum(Kg, na.rm = TRUE),
+        .groups = "drop"
+      )
+    
+    # -----------------------------------------------------
+    # EFFORT
+    # -----------------------------------------------------
+    
+    Es <- effort_gridded_list_wide[[y]]
+    
+    actual_id_grounds <- intersect(
+      grounds_i,
+      colnames(Es)
+    )
+    
+    keep_cols <- c(
+      "CFR", "YEAR", "MONTH",
+      "Gear", "VL",
+      actual_id_grounds
+    )
+    
+    Es <- Es[, keep_cols]
+    
+    cfleet_logit <- intersect(Ls$CFR, Es$CFR)
+    
+    if(length(cfleet_logit) == 0) next
+    
+    # filtra
+    Es <- Es %>%
+      dplyr::filter(CFR %in% cfleet_logit)
+    
+    Ls <- Ls %>%
+      dplyr::filter(CFR %in% cfleet_logit)
+    
+    # -----------------------------------------------------
+    # FORMAT LANDINGS
+    # -----------------------------------------------------
+    
+    Ls <- data.frame(
+      CFR   = as.character(Ls$CFR),
+      VL    = as.character(Ls$VL),
+      MONTH = factor(
+        month.name[Ls$Month],
+        levels = month.name
+      ),
+      Kg    = Ls$Kg
+    )
+    
+    # -----------------------------------------------------
+    # JOIN
+    # -----------------------------------------------------
+    
+    logit.join <- dplyr::inner_join(
+      Ls %>% dplyr::select(CFR, MONTH, VL, Kg),
+      Es[, !(colnames(Es) %in% "YEAR")]
+    )
+    
+    if(nrow(logit.join) == 0) next
+    
+    # -----------------------------------------------------
+    # LOOP GEARS
+    # -----------------------------------------------------
+    
+    gears_present <- unique(logit.join$Gear)
+    
+    for(g in seq_along(gears_present)) {
+      
+      gear_i <- gears_present[g]
+      
+      logit.join.g <- logit.join %>%
+        dplyr::filter(Gear == gear_i)
+      
+      if(nrow(logit.join.g) == 0) next
+      
+      # threshold logit
+      q01logit_s <- 10^quantile(
+        log10(Ls$Kg),
+        quantile_Logit,
+        na.rm = TRUE
+      )
+      
+      # livelli presenti
+      vls_i <- unique(logit.join.g$VL)
+      
+      # ---------------------------------------------------
+      # LOOP VL
+      # ---------------------------------------------------
+      
+      for(v in seq_along(vls_i)) {
+        
+        vl_i <- vls_i[v]
+        
+        logit.join.g.v <- logit.join.g %>%
+          dplyr::filter(VL == vl_i)
+        
+        if(nrow(logit.join.g.v) == 0) next
+        
+        months_i <- unique(logit.join.g.v$MONTH)
+        
+        # -------------------------------------------------
+        # LOOP MONTH
+        # -------------------------------------------------
+        
+        for(m in seq_along(months_i)) {
+          
+          month_i <- months_i[m]
+          
+          # filtro finale
+          logit.join.g.m <- logit.join.g.v %>%
+            dplyr::filter(
+              MONTH == month_i,
+              Kg > q01logit_s
+            )
+          
+          if(nrow(logit.join.g.m) <= 1) next
+          
+          # -----------------------------------------------
+          # LPUE
+          # -----------------------------------------------
+          
+          lpue <- getLPUE(logit.join.g.m)
+          
+          if(is.null(lpue) || nrow(lpue) == 0) next
+          
+          # -----------------------------------------------
+          # OUTPUT
+          # -----------------------------------------------
+          
+          n_lpue <- nrow(lpue)
+          
+          lpue_list[[counter]] <- data.frame(
+            YEAR    = rep(year_i, n_lpue),
+            species = rep(species_i, n_lpue),
+            lpue
+          )
+          
+          counter <- counter + 1
+          
+        } # end month
+        
+      } # end VL
+      
+    } # end gear
+    
+  } # end year
+  
+} # end species
+
+
+# =========================================================
+# CLOSE PROGRESS BAR
+# =========================================================
+
+# close(pb)
+
+# =========================================================
+# FINAL BIND
+# =========================================================
+
+df_lpue <- dplyr::bind_rows(lpue_list)
+
+saveRDS(df_lpue,paste0(out_dir,"/df_lpue.rData"))
+
+
+```
+
+### 4.1.1 Plot LPUE by Gear and Month
+
+```{r lpue by gear month, fig.align= "center", fig.height= 5, fig.width= 10, warning=FALSE, message=FALSE, echo=FALSE}
+
+df_lpue_agg = df_lpue %>% 
+  group_by(YEAR, VL, MONTH, Gear, species) %>% 
+  summarise(lpue_sum = sum(LPUE_grid, na.rm = TRUE),.groups = "drop") 
+  
+
+ggplot(df_lpue_agg,aes(x = reorder(species,-lpue_sum),y = lpue_sum)) +
+  geom_boxplot(fill = "lightblue2")+
+    theme_test() + 
+  ggtitle("LPUE by Species") +
+  ylab("LPUE") +
+  xlab("Species")
+```
+
+### 4.1.2 Plot Spatial LPUE by Gear and Species
+
+```{r plot lpue, fig.align= "center", fig.height = 6, fig.width = 6, warning=FALSE, message=FALSE}
+
+df_lpue_sum = df_lpue %>% 
+                  group_by(YEAR, MONTH, species , Gear , VL , id_grid) %>% 
+                  summarise(LPUE_grid = sum(LPUE_grid, na.rm = T)) %>% 
+                  group_by(species ,Gear, VL ,  id_grid) %>% 
+                  summarise(LPUE_grid = round(mean(LPUE_grid, na.rm = T),2)) 
+                 
+                  
+
+
+grid_sf_lpue <- inner_join(grid_sf, df_lpue_sum)
+
+png_coords <- df_lpue %>% dplyr::select(species) %>%
+  group_by(species) %>%
+  summarize(
+    x = 13,
+    y = 36.5,
+    .groups = "drop"
+  ) %>%
+  mutate(silhouette = paste0(wd_set,"Input file/png/", species, ".png")) 
+
+
+
+for(s_index in 1:length(species_to_submit)){ # Species
+  
+  fmaplpue = grid_sf_lpue %>% 
+              filter(species == species_to_submit[s_index]) %>% 
+        ggplot() +
+        geom_polygon(data = mp, aes(long, lat, group = group), 
+                     fill = "lightgray") +
+        geom_sf(aes(fill = LPUE_grid), 
+                colour = NA) +
+        scale_fill_viridis_c("LPUE (Kg/h/m)", option = "plasma", na.value = "NA") +
+        xlab("Longitude") + ylab("Latitude") +
+        theme_test() +
+        theme(panel.background = element_rect(fill = "white"), 
+              legend.position = "bottom", legend.key.width=unit(1,"cm"), 
+              plot.title = element_text(size = 12), panel.spacing =unit(0.5,"cm")) +
+        facet_wrap(~ VL) +
+        coord_sf(xlim = map_xlim,
+                 ylim = map_ylim,
+                 expand = TRUE) + 
+          geom_image(data = png_coords %>% filter(species == species_to_submit[s_index]), 
+             aes(x = x, y = y, image = silhouette), 
+             inherit.aes = FALSE, 
+             size = 0.4) +
+    ggtitle(
+  bquote(
+    .(species_to_submit[s_index]) ~ "-" ~ 
+    italic(.(fao3$Scientific_name[
+      which(fao3$`3A_CODE` == species_to_submit[s_index])
+    ]))
+  )
+)
+  
+  
+  ggsave(fmaplpue, filename = paste0(out_dir,"/Results/Fig6_",species_to_submit[s_index],".jpeg"),width = 22, height = 14, units = "cm", dpi = 300)
+}
+```
+
+## 4.2 Get spatial landings and check with FDI data (Table A) - estimation of raising parameters
+- FDI price = value/landings
+
+```{r FDI check,warning=FALSE, message=FALSE}
+
+df_lpue$YEAR = as.character(df_lpue$YEAR)
+
+df_prod = df_lpue %>% 
+           mutate(Quarter = as.character(case_when(
+                                 MONTH %in% c("January", "February", "March") ~ 1,
+                                 MONTH %in% c("April", "May", "June") ~ 2,
+                                 MONTH %in% c("July", "August", "September") ~ 3,
+                                 MONTH %in% c("October", "November", "December") ~ 4 ))) 
+  
+df_prod_agg <- df_prod %>%
+      group_by(YEAR, Quarter, Gear,VL, species) %>%
+      summarise(landings = round(
+                  sum(landing_grid, na.rm = TRUE),2),
+                .groups = "drop") 
+
+df_prod_agg$landings[df_prod_agg$landings == 0] <- 1
+
+# Compare with FDI A
+df_prod_FDI =  fdiA %>% 
+               filter(species %in% species_to_submit,
+                                    year %in% years_to_submit,
+                                    sub_region %in% CS_gsas,
+                                    country_code == "ITA",
+                                    gear_type %in% gears_to_submit,
+                                    vessel_length %in% c("VL1218", "VL1824", "VL2440", "VL40XX")) %>% 
+                                    rename(VL = vessel_length, 
+                                           Quarter = quarter,
+                                           YEAR = year, 
+                                           Gear = gear_type) %>% 
+                    mutate(YEAR = as.character(YEAR),
+                           Quarter = as.character(Quarter))
+
+df_prod_FDI <- df_prod_FDI %>% 
+                group_by(YEAR,Quarter,Gear, species , sub_region , VL) %>% 
+                summarise(totwghtlandg = sum(totwghtlandg, na.rm = T),
+                          totvallandg = sum(totvallandg, na.rm = T),.groups = "drop") %>% 
+                 mutate(FDI_kg = totwghtlandg * 1000,
+                      Price_t = round(totvallandg/totwghtlandg,3),
+                      Price_Kg = round(Price_t / 1000,3))
+  
+  
+df_compare = inner_join(df_prod_agg, df_prod_FDI)
+
+df_compare$rate = df_compare$FDI_kg/df_compare$landings
+
+df_compare_long = df_compare %>% 
+                dplyr::select(YEAR,Quarter, Gear, VL,  species, landings, FDI_kg) %>% 
+      melt(id.vars = c("YEAR","Quarter" ,"Gear", "VL", "species"))
+
+
+df_compare_long = df_compare_long %>% mutate(source = recode(variable, 
+                                         "landings" = "MODEL", 
+                                         "FDI_kg" = "FDI"))
+
+# mean_rates = aggregate(data = df_compare,
+#                        rate ~ YEAR + Gear + VL+ species, FUN = "mean")
+
+
+```
+
+
+
+```{r compare, warning=FALSE, message=FALSE, fig.width= 11, fig.height= 4, fig.align= "center", }
+
+gbox = ggplot(data = df_compare,
+       aes(x = species, y = rate)) + 
+  geom_boxplot(outliers = FALSE) + 
+  facet_wrap(~ Gear+VL, nrow = 1, scales = "free") + 
+  geom_hline(yintercept = 1, colour = "red", linetype = 2) + 
+  theme_test() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+print(gbox)
+
+
+ggcomp_land = df_compare %>%
+ggplot(aes(x = FDI_kg   , y = landings ))+
+  geom_point()+
+  geom_smooth(method = "lm")+
+  facet_wrap(~ VL, scales = "free")+
+  ggpubr::stat_cor(
+    method = "pearson",
+    label.x.npc = "left",
+    label.y.npc = "top",
+    aes(label = paste(..p.label.., ..rr.label.., sep = "~`,`~"))
+  ) +
+  scale_y_continuous(labels = scales::label_comma())+
+  scale_x_continuous(labels = scales::label_comma())+
+  theme_bw()+
+  ggtitle("Check Effort with FDI data")
+
+
+print(ggcomp_land)
+
+
+```
+
+
+```{r prod rescaled, warning=FALSE, message=FALSE}
+
+df_prod_rescaled = df_prod %>% 
+                      left_join(df_compare, by = c("YEAR","species","VL","Gear","Quarter" )) %>% 
+                      mutate(landings_res = landing_grid * rate, na.rm = T)
+
+```
+
+
+# 5 Economic Indicators
+
+## 5.1 Calculate revenues  and compare with AER landing FAO
+
+By multiplying our rescaled high-resolution spatial landings by the corresponding market prices extracted from FDI financial records, we generate downscaled economic indicators. This step provides explicit spatial representations of gross fishing revenues and value-based LPUE (vLPUE) across individual grid cells.
+
+```{r get spatial indicators,  warning=FALSE, message=FALSE, fig.width= 12, fig.height= 8, fig.align= "center"}
+
+
+full_model = df_prod_rescaled %>% 
+             mutate(value_of_landings = landings_res * Price_Kg,
+                     vLPUE = LPUE_grid * Price_Kg) %>% 
+              drop_na()
+              
+
+saveRDS(full_model,paste0(out_dir,"/df_value_of_landings.rData"))
+  
+
+```
+
+To verify the structural integrity of our revenue models, the downscaled landing values are validated against macro-economic references from the STECF Annual Economic Report (AER). This comparative diagnostic ensures that our spatialized, fine-scale revenue distributions align with the official economic benchmarks reported for the regional fleet segments.
+
+```{r AER compare landings, warning=FALSE, message=FALSE, fig.width= 10, fig.height= 4, fig.align= "center"}
+AER_land = read.xlsx("Input file/STECF_25 07_Landings_fao.xlsx",sheet = 2)
+AER_land_CS = AER_land %>% 
+                filter(country_name %in% "Italy",
+                       year %in% years_to_submit,
+                       fishing_tech %in% fts,
+                       sub_reg %in% "sa 16",
+                       species_code %in% species_to_submit) %>% 
+  dplyr::select(year,vessel_length,variable_code,value,species_code, unit) %>% 
+                rename(YEAR = year,species = species_code,VL = vessel_length) %>% 
+                mutate(YEAR = as.character(YEAR))
+
+AER_land_CS_sel = AER_land_CS %>% 
+                  dcast(YEAR+species+VL~variable_code, value.var = "value")
+
+
+full_model_agg = full_model %>% 
+                  group_by(YEAR,species,VL) %>% 
+                  summarise(value_of_landings_sum = sum(value_of_landings))
+
+eco_check = full_model_agg %>% 
+              left_join(AER_land_CS_sel) %>% 
+              mutate(rate = totvallandg/value_of_landings_sum)
+
+ggplot(eco_check, aes(x = totvallandg, y = value_of_landings_sum, fill = VL))+
+  geom_point()+
+  geom_smooth(method = "lm")+
+  scale_x_continuous(labels = scales::label_comma())+
+  scale_y_continuous(labels = scales::label_comma())+
+  facet_wrap(~ VL, scales = "free")+
+  xlab("AER value of landings - FAO ")+
+  ylab("Model value of landings")+
+  theme_bw()+
+  theme(legend.position = "none")
+
+```
+
+
+```{r eco check, warning=FALSE, message=FALSE, fig.align='center', fig.width= 10, fig.height= 8, echo=FALSE}
+eco_check_long =  eco_check %>% 
+                    rename(AER_value_of_landings = totvallandg,
+                           Model_value_of_landings = value_of_landings_sum) %>% 
+                    dplyr::select(-totwghtlandg , -rate) %>% 
+                    melt(id.vars = c("YEAR",  "species" ,"VL"  ))
+
+ggplot(eco_check_long)+
+  geom_boxplot(aes(x = species, y = value, fill = variable))+
+  theme_bw()+
+  facet_wrap(~ species, scales = "free")
+```
+
+
+```{r save data, warning=FALSE, message=FALSE}
+
+write_sf(grid_sf[,c("id_grid","depth","geometry")], paste0(out_dir, "/Results/grid_sf.shp"))
+
+saveRDS(effort_sf_gridded_list , file = paste0(out_dir, "/effort_gridded_list.rData"))
+saveRDS(effort_gridded_all, file = paste0(out_dir, "/effort_gridded_all.rData"))
+saveRDS(effort_gridded_list_wide, file = paste0(out_dir, "/effort_gridded_list_wide.rData"))
+saveRDS(df_prod, file = paste0(out_dir, "/df_prod.rData"))
+saveRDS(df_prod_rescaled, file = paste0(out_dir, "/df_prod_rescaled.rData"))
+
+```
+
+
+## 5.2 Prepare economic data - Costs
+
+To shift our focus from gross revenues to gross profit, we prepare the economic dataset for cost integration. This involves pairing harbour identifiers back into the spatial grids to map out the geographic distribution of fixed and variable operating costs.
+
+```{r AER costs, warning=FALSE, message=FALSE}
+
+fleet_harbs = unique(final_fleet_detail_loa_power[,c("CFR", "HARBOUR")])
+
+FishTrack_grid_harb = FishTrack_grid %>%  left_join(fleet_harbs)
+
+full_model_harb = full_model %>%  left_join(fleet_harbs)
+
+
+full_model_agg_sum = full_model_harb %>%
+                      mutate(
+                      WF = ifelse(grepl("[0-9]+_WF$", id_grid), "in", "out")) %>% 
+                      group_by(WF,CFR, YEAR, MONTH, Quarter, Gear,VL,HARBOUR) %>%
+                      summarise(landings_res = sum(landings_res, na.rm = TRUE),
+                                value_of_landings = sum(value_of_landings, na.rm = TRUE),
+                                vLPUE = sum(vLPUE, na.rm = TRUE),
+                                Price_Kg = mean(Price_Kg, na.rm = TRUE), .groups = "drop")
+
+full_model_fishtrip =  FishTrack_grid_harb %>% 
+                        mutate(
+                        WF = ifelse(grepl("[0-9]+_WF$", id_grid), "in", "out"),
+                        Quarter = as.character(case_when(
+                                 MONTH %in% c("January", "February", "March") ~ 1,
+                                 MONTH %in% c("April", "May", "June") ~ 2,
+                                 MONTH %in% c("July", "August", "September") ~ 3,
+                                 MONTH %in% c("October", "November", "December") ~ 4 )) ) %>% 
+                        group_by(WF,CFR, YEAR, MONTH, Quarter,VL,HARBOUR) %>%
+                        summarize(fishdays = median(fishing_days), .groups = "drop")
+
+full_model_eco = inner_join(full_model_agg_sum, full_model_fishtrip,
+                            by = c("WF","CFR","YEAR","MONTH","Quarter","VL","HARBOUR"))
+
+
+```
+
+
+
+## 5.3 Add AER Costs and calculate Gross Profit
+
+In this section, we ingest comprehensive operational cost structures from the STECF fleet segment database, including energy overheads, personnel wages, repair and maintenance, and fixed non-variable costs. These annual values are disaggregated into daily operational cost rates based on official sea days. By subtracting these localized daily costs from our spatial gross landing revenues, we compute the ultimate Gross Profit (GRP) for individual vessel groups operating inside versus outside the wind farm perimeter.
+
+```{r costs, warning=FALSE, message=FALSE, fig.height= 5, fig.width= 9}
+
+AER_Costs = openxlsx::read.xlsx("Input file/STECF_25 07_EU Fleet Economic and Transversal data_fleet segment level.xlsx", sheet = 2) %>% 
+             mutate(year = as.character(year)) %>% 
+             filter(country_code %in% "ITA",
+                 year %in% c("2020", "2021", "2022", "2023"),
+                 fishing_tech %in% c("DTS"), supra_reg %in% c("MBS"), 
+                 variable_name %in% c("Gross value of landings",
+                                      "Other income",
+                                    "Days at sea",
+                                    "Personnel costs",
+                                    "Value of unpaid labour",
+                                    "Energy costs",
+                                    "Repair & maintenance costs",
+                                    "Other variable costs",
+                                    "Other non-variable costs") ) %>% 
+           rename(VL = vessel_length,  YEAR = year ) %>% 
+           mutate(variable_name = gsub(" ", "_", variable_name))
+            
+AER_Costs_tot = AER_Costs %>% 
+            dcast(YEAR + VL ~ variable_name, value.var="value") %>% 
+   mutate(AER_GRP_tot = (Gross_value_of_landings + Other_income)  - (Personnel_costs + Value_of_unpaid_labour + Energy_costs + `Repair_&_maintenance_costs` + Other_variable_costs + `Other_non-variable_costs`))
+
+AER_dayCosts <- AER_Costs_tot %>% 
+  group_by(YEAR, VL) %>% 
+  summarise(across( c(
+         Gross_value_of_landings,
+         Other_income,
+          Energy_costs,
+        `Other_non-variable_costs`,
+        Other_variable_costs,
+        Personnel_costs,
+        `Repair_&_maintenance_costs`,
+        Value_of_unpaid_labour),
+      ~ round(.x / Days_at_sea, 2)),.groups = "drop") %>% 
+  mutate(AER_GRP = (Gross_value_of_landings + Other_income)  - (Personnel_costs + Value_of_unpaid_labour + Energy_costs + `Repair_&_maintenance_costs` + Other_variable_costs + `Other_non-variable_costs`))
+
+write.xlsx(AER_dayCosts, paste0(out_dir,"/Results/AER_dayCosts.xlsx"))
+
+
+
+full_model_eco_agg = full_model_eco %>% 
+                 group_by(YEAR, VL,WF,HARBOUR) %>%
+        summarise(vland = sum(value_of_landings, na.rm = T),
+                  fishdays_tot = sum(fishdays, na.rm = T),
+                  price = mean(Price_Kg, na.rm = T),
+          daily_value_of_landings =  vland/fishdays_tot,
+           .groups = "drop")
+
+
+
+###
+
+col_costs = c("YEAR","VL","Other_income","Energy_costs", "Other_non-variable_costs","Other_variable_costs",
+  "Personnel_costs","Repair_&_maintenance_costs","Value_of_unpaid_labour")
+
+full_model_eco_agg_GRP = full_model_eco_agg %>% 
+                        left_join(AER_dayCosts[,col_costs]) %>% 
+                   mutate(GRP = round((daily_value_of_landings + Other_income)  - (Personnel_costs + Value_of_unpaid_labour + Energy_costs + `Repair_&_maintenance_costs` + Other_variable_costs + `Other_non-variable_costs`),2)) 
+
+aer_gv = c("YEAR", "VL","AER_GRP_tot")
+
+GRP_check = full_model_eco_agg_GRP %>% 
+              group_by(YEAR, VL) %>%
+              summarise(GRP =sum(GRP)*1000) %>%
+              left_join(AER_Costs_tot[,aer_gv]) %>% 
+              mutate(rate = AER_GRP_tot / GRP)
+
+full_model_eco_agg_GRP_rescaled <- full_model_eco_agg_GRP %>%
+  left_join(
+    GRP_check %>% select(YEAR, VL, rate),
+    by = c("YEAR", "VL")
+  ) %>%
+  mutate(GRP_rescaled = GRP * rate)
+
+
+
+
+  full_model_eco_agg_GRP_rescaled %>%
+  left_join(AER_Costs_tot[, aer_gv], by = c("YEAR", "VL")) %>% 
+  ggplot(aes(x = AER_GRP_tot, y = GRP_rescaled))+
+  geom_point()+
+  geom_smooth(method = "lm")+
+  facet_wrap(~VL)+
+  xlab("AER Gross Profit")+
+  ylab("Model Gross Profit")+
+  scale_x_continuous(labels = scales::label_comma())+
+  scale_y_continuous(labels = scales::label_comma())+
+  theme_bw()
+  
+  
+ 
+```
+
+# 6 Result and conclusion
+
+```{r plot and table, warning=FALSE, message=FALSE, fig.width=10}
+
+df_prop = full_model_eco_agg_GRP_rescaled %>% 
+  group_by(HARBOUR, WF, YEAR, VL) %>% 
+  summarise(GRP_rescaled = sum(GRP_rescaled, na.rm = TRUE), .groups = "drop") %>% 
+  group_by(HARBOUR, WF, VL) %>% 
+  summarise(GRP_rescaled = median(GRP_rescaled, na.rm = TRUE), .groups = "drop") %>% 
+  group_by(HARBOUR, VL) %>% 
+  mutate(prop = abs(GRP_rescaled) / sum(abs(GRP_rescaled), na.rm = TRUE)) %>% 
+  ungroup() 
+
+ggros =   ggplot(df_prop,
+        aes(y = HARBOUR,x = prop,fill = WF)) +
+        geom_bar(stat = "identity") +
+       facet_grid(VL ~ ., scales = "free_y", space = "free_y") +
+       xlab("%") +
+       ylab("") +
+       scale_fill_brewer(palette = "Set1")+
+       ggtitle("Proportion of Gross Profits (euro)") +
+       theme_bw()
+
+ggsave(ggros, filename = paste0(out_dir,"/Results/ggros.jpeg"),width = 14, height = 10, units = "cm", dpi = 300)
+
+print(ggros)
+
+ggros2 = full_model_eco_agg_GRP_rescaled %>% 
+  group_by(WF, YEAR, VL, HARBOUR) %>% 
+  summarise(sum_GRP = sum(abs(GRP_rescaled)), .groups = "drop") %>% 
+  mutate(sum_GRP_scaled = scales::rescale(sum_GRP, to = c(0, 1000))) %>% 
+  ggplot(aes(x = HARBOUR, y = sum_GRP_scaled, fill = WF)) +
+  geom_boxplot() +
+  scale_fill_brewer(palette = "Set1")+
+  ylab("Gross Profits (euro) (rescaled 0–1000)") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(ggros2, filename = paste0(out_dir,"/Results/ggros2.jpeg"),width = 14, height = 10, units = "cm", dpi = 300)
+
+
+tableGRP = full_model_eco_agg_GRP_rescaled %>% 
+               mutate(Gross_Profit = abs(GRP_rescaled),
+                      Value_of_Landing = round(vland, 3) ) %>% 
+                dplyr::select(WF, YEAR, VL, HARBOUR, Value_of_Landing,fishdays_tot, Gross_Profit) %>%   
+                unique() 
+
+write.xlsx(tableGRP, paste0(out_dir,"/Results/table_GRP.xlsx"))
+
+```
+
+
